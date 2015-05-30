@@ -1,0 +1,399 @@
+<?php
+
+
+/**
+ * Mandrill WireMail module
+ *
+ * This module extends the WireMail base class.
+ * It includes the official Mandrill PHP library found at https://bitbucket.org/mailchimp/mandrill-api-php/
+ *
+ *
+ * @copyright Copyright (c) 2015, Craig A Rodway
+ * @license http://www.gnu.org/licenses/gpl-2.0.txt GNU General Public License, version 2
+ *
+ * ProcessWire 2.x
+ * Copyright (C) 2013 by Ryan Cramer
+ * Licensed under GNU/GPL v2, see LICENSE.TXT
+ *
+ * http://www.processwire.com
+ *
+ */
+
+
+class WireMailMandrill extends WireMail implements Module, ConfigurableModule {
+
+
+	public static function getModuleInfo() {
+		return array(
+			'title' => 'Wire Mail Mandrill',
+			'version' => 001,
+			'summary' => 'A WireMail implementation using the Mandrill HTTP API',
+			'singular' => false,
+			'autoload' => false,
+		);
+	}
+
+
+	private $_valid_keys = array(
+		'important',
+		'track_opens',
+		'track_clicks',
+		'auto_text',
+		'auto_html',
+		'inline_css',
+		'url_strip_qs',
+		'preserve_recipients',
+		'view_content_link',
+		'bcc_address',
+		'tracking_domain',
+		'signing_domain',
+		'return_path_domain',
+		'merge',
+		'merge_language',
+		'subaccount',
+	);
+
+	private $mandrill = null;
+	private $message = array();
+	private $result = array();
+	private $_merge_vars = array();
+	private $_global_merge_vars = array();
+	private $_recipient_metadata = array();
+	private $_attachments = array();
+	private $_images = array();
+
+
+	/**
+	 * Establish default config settings
+	 *
+	 */
+	public function __construct() {
+		$this->set('apiKey', null);
+		$this->set('async', null);
+		$this->set('ip_pool', null);
+		$this->set('send_at', null);
+	}
+
+
+	/**
+	 * Initialize the module
+	 *
+	 */
+	public function init() {
+		if ($this->apiKey) {
+			require_once($this->config->paths->WireMailMandrill . 'mandrill-api-php/src/Mandrill.php');
+			$this->mandrill = new Mandrill($this->apiKey);
+		}
+	}
+
+
+	public function __call($name, $args) {
+
+		if (isset($this->_valid_keys[$name])) {
+			$this->message[$key] = $args[0];
+		}
+
+		return parent::__call($name, $args);
+
+	}
+
+
+	public function merge_vars($name = '', $content = '', $rcpt = FALSE) {
+
+		if ($rcpt === FALSE) {
+			// Global
+			if (is_null($content)) {
+				unset($this->_global_merge_vars[$name]);
+			} else {
+				$this->_global_merge_vars[$name] = $content;
+			}
+		} else {
+			// Recipient
+			if (is_null($content)) {
+				unset($this->_merge_vars[$rcpt][$name]);
+			} else {
+				$this->_merge_vars[$rcpt][$name] = $content;
+			}
+		}
+
+		return $this;
+	}
+
+
+	public function tags($name = '') {
+		$this->message['tags'][] = $name;
+		return $this;
+	}
+
+
+	public function metadata($key = '', $value = '', $rcpt = FALSE) {
+
+		if ($rcpt === FALSE) {
+			if (is_null($value)) {
+				unset($this->message['metadata'][$key]);
+			} else {
+				$this->message['metadata'][$key] = $value;
+			}
+		} else {
+			if (is_null($value)) {
+				unset($this->_recipient_metadata[$rcpt][$key]);
+			} else {
+				$this->_recipient_metadata[$rcpt][$key];
+			}
+		}
+
+		return $this;
+	}
+
+
+	public function google_analytics_domains($value = '') {
+
+		if ( ! is_array($value)) {
+			$value = explode(',', $value);
+		}
+
+		$this->message['google_analytics_domains'] = $value;
+
+		return $this;
+	}
+
+
+	public function attachments($filepath = '', $name = NULL) {
+
+		$key = md5($filepath);
+
+		if ( ! file_exists($filepath)) {
+			return FALSE;
+		}
+
+		if (is_null($name)) {
+			$name = basename($filepath);
+		}
+
+		$info = pathinfo($filepath);
+		$ext = strtolower($info['extension']);
+		$contentTypes = wire('config')->fileContentTypes;
+		$contentType = isset($contentTypes[$ext]) ? $contentTypes[$ext] : $contentTypes['?'];
+		$contentType = str_replace('+', '', $contentType);
+
+		$this->_attachments[$key] = array(
+			'filepath' => $filepath,
+			'type' => $contentType,
+			'name' => $name,
+		);
+
+		return $this;
+	}
+
+
+	public function attachment($filepath = '', $name = NULL) {
+		return $this->attachments($filepath, $name);
+	}
+
+
+	public function images($filepath = '', $name = NULL) {
+
+		$key = md5($filepath);
+
+		if ( ! file_exists($filepath)) {
+			return FALSE;
+		}
+
+		if (is_null($name)) {
+			$name = basename($filepath);
+		}
+
+		$info = pathinfo($filepath);
+		$ext = strtolower($info['extension']);
+		$contentTypes = wire('config')->fileContentTypes;
+		$contentType = isset($contentTypes[$ext]) ? $contentTypes[$ext] : $contentTypes['?'];
+		$contentType = str_replace('+', '', $contentType);
+
+		$this->_images[$key] = array(
+			'filepath' => $filepath,
+			'type' => $contentType,
+			'name' => $name,
+		);
+
+		return $this;
+	}
+
+
+	public function image($filepath = '', $name = NULL) {
+		return $this->images($filepath, $name);
+	}
+
+
+	private function buildMessage() {
+
+		$this->message['html'] = $this->bodyHTML;
+		$this->message['text'] = $this->body;
+		$this->message['subject'] = $this->subject;
+		$this->message['from_email'] = $this->from;
+		$this->message['from_name'] = $this->fromName;
+
+		foreach ($this->to as $rcpt) {
+			$this->message['to'][] = array(
+				'email' => $rcpt,
+				'name' => $this->toName[$rcpt],
+				'type' => 'to',
+			);
+		}
+
+		$this->message['headers'] = $this->header;
+
+		foreach ($this->_global_merge_vars as $name => $content) {
+			$this->message['global_merge_vars'][] = array(
+				'name' => $name,
+				'content' => $content,
+			);
+		}
+
+		foreach ($this->_merge_vars as $rcpt => $vars) {
+
+			$rcpt_vars = array(
+				'rcpt' => $rcpt,
+				'vars' => array(),
+			);
+
+			foreach ($vars as $name => $content) {
+				$rcpt_vars['vars'][] = array(
+					'name' => $name,
+					'content' => $content,
+				);
+			}
+
+			$this->message['merge_vars'][] = $rcpt_vars;
+		}
+
+		foreach ($this->_recipient_metadata as $rcpt => $values) {
+
+			$rcpt_values = array(
+				'rcpt' => $rcpt,
+				'values' => $values,
+			);
+
+			$this->message['recipient_metadata'][] = $rcpt_values;
+		}
+
+		foreach ($this->_attachments as $id => $attachment) {
+
+			$content = file_get_contents($attachment['filepath']);
+			$content = base64_encode($content);
+
+			$this->message['attachments'][] = array(
+				'type' => $attachment['type'],
+				'name' => $attachment['name'],
+				'content' => $content,
+			);
+
+		}
+
+		foreach ($this->_images as $id => $image) {
+
+			$content = file_get_contents($image['filepath']);
+			$content = base64_encode($content);
+
+			$this->message['images'][] = array(
+				'type' => $image['type'],
+				'name' => $image['name'],
+				'content' => $content,
+			);
+
+		}
+
+	}
+
+
+	public function async($value = null) {
+		$this->async = $value;
+	}
+
+
+	public function ip_pool($value = null) {
+		$this->ip_pool = $value;
+	}
+
+
+	public function send_at($value = null) {
+		$this->send_at = $value;
+	}
+
+
+	/**
+	 * Send email and return how many were successfully sent
+	 *
+	 * @return int
+	 *
+	 */
+	public function ___send() {
+
+		// Compose the Mandrill message array based on all options set
+		$this->buildMessage();
+
+
+		try {
+			$result = $this->mandrill->messages->send($this->message, $this->async, $this->ip_pool, $this->send_at);
+		} catch (Mandrill_Error $e) {
+			$this->log->save('wiremail-mandrill', get_class($e) . ': ' . $e->getMessage(), array('showUser' => false));
+			throw new WireException($e->getMessage());
+		}
+
+		$success = 0;
+		$failure = 0;
+
+		if ( ! is_array($result)) {
+			return FALSE;
+		}
+
+		foreach ($result as $sent) {
+			switch ($sent['status']) {
+				case 'sent':
+				case 'queued':
+				case 'scheduled':
+					$success++;
+				break;
+
+				case 'rejected':
+				case 'invalid':
+					$failure++;
+				break;
+			}
+		}
+
+		$this->result = $result;
+
+		return $success;
+
+	}
+
+
+	public function getResult() {
+		return $this->result;
+	}
+
+
+	/**
+	 * Configure WireMailMandrill
+	 *
+	 */
+	public static function getModuleConfigInputfields(array $data) {
+
+		if ( ! isset($data['apiKey'])) {
+			$data['apiKey'] = null;
+		}
+
+		$form = new InputfieldWrapper();
+
+		$f = wire('modules')->get('InputfieldText');
+		$f->attr('name', 'apiKey');
+		$f->attr('value', $data['apiKey']);
+		$f->label = __('API Key');
+		$f->description = __('You can manage API keys on the main Settings page when logged in to Mandrill.');
+		$form->add($f);
+
+		return $form;
+	}
+
+
+}
