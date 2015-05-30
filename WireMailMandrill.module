@@ -26,9 +26,9 @@ class WireMailMandrill extends WireMail implements Module, ConfigurableModule {
 	public static function getModuleInfo() {
 		return array(
 			'title' => 'Wire Mail Mandrill',
-			'version' => 100,
+			'version' => 001,
 			'summary' => 'A WireMail implementation using the Mandrill HTTP API',
-			'singular' => true,
+			'singular' => false,
 			'autoload' => false,
 		);
 	}
@@ -96,6 +96,7 @@ class WireMailMandrill extends WireMail implements Module, ConfigurableModule {
 		return parent::__call($name, $args);
 
 	}
+
 
 	public function merge_vars($name = '', $content = '', $rcpt = FALSE) {
 
